@@ -27,6 +27,7 @@ var optional = require('./lib/optional')
   , copy = require('./lib/copy')
   , debug = require('./lib/debug')
   , getSafe = require('./lib/getSafe')
+  , zlib = require('zlib')
   ;
 
 function safeStringify (obj) {
@@ -631,6 +632,8 @@ Request.prototype.onResponse = function (response) {
   self.response = response
   response.request = self
   response.toJSON = toJSON
+  response.isGzipped = (response.headers['content-encoding'] && response.headers['content-encoding'].toLowerCase().indexOf('gzip') >= 0) ? true : false
+  response.isJson = self._json || (response.headers['content-type'] && response.headers['content-type'].toLowerCase().indexOf('application/json') >= 0)
 
   // XXX This is different on 0.10, because SSL is strict by default
   if (self.httpModule === https &&
@@ -845,6 +848,7 @@ Request.prototype.onResponse = function (response) {
         buffer.push(chunk)
         bodyLen += chunk.length
       })
+
       self.on("end", function () {
         debug('end event', self.uri.href)
         if (self._aborted) {
@@ -860,11 +864,6 @@ Request.prototype.onResponse = function (response) {
             chunk.copy(body, i, 0, chunk.length)
             i += chunk.length
           })
-          if (self.encoding === null) {
-            response.body = body
-          } else {
-            response.body = body.toString(self.encoding)
-          }
         } else if (buffer.length) {
           // The UTF8 BOM [0xEF,0xBB,0xBF] is converted to [0xFE,0xFF] in the JS UTC16/UCS2 representation.
           // Strip this value out when the encoding is set to 'utf8', as upstream consumers won't expect it and it breaks JSON.parse().
@@ -874,17 +873,38 @@ Request.prototype.onResponse = function (response) {
           response.body = buffer.join('')
         }
 
-        if (self._json) {
+        if (response.isGzipped) {
+          zlib.gunzip(body, function(err, decoded) {
+            if(err) {
+              self.emit('error', error)
+            } else {
+              self.emit('response_body_complete', decoded)
+            }
+          })
+        } else {
+          self.emit("response_body_complete", body)
+        }
+
+      })
+
+      self.on("response_body_complete", function(body){
+        if (self.encoding === null)
+          response.body = body
+        else
+          response.body = body.toString(self.encoding)
+
+        if (response.isJson) {
           try {
             response.body = JSON.parse(response.body)
-          } catch (e) {}
+          } catch(e) {}
         }
         debug('emitting complete', self.uri.href)
         if(response.body == undefined && !self._json) {
           response.body = "";
         }
-        self.emit('complete', response, response.body)
+        self.emit("complete", response, response.body)
       })
+
     }
     //if no callback
     else{
@@ -893,7 +913,7 @@ Request.prototype.onResponse = function (response) {
           debug('aborted', self.uri.href)
           return
         }
-        self.emit('complete', response);
+        self.emit('complete', response)
       });
     }
   }
